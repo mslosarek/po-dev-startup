@@ -8,26 +8,63 @@ NC='\033[0m' # No Color
 
 # Get the directory where this script is located
 SCRIPT_DIR="${0:A:h}"
+DEFAULT_ROOT="$SCRIPT_DIR/../core"
+
+SESSION_NAME="dev-env"
+# tmux session environment variable that records which monorepo checkout
+# the running session was started from, so stop/status/restart can find it.
+ROOT_ENV_VAR="DEV_SPLIT_ROOT"
+
+# Reads the monorepo root the running session was started from, if any.
+session_root() {
+    tmux show-environment -t "$SESSION_NAME" "$ROOT_ENV_VAR" 2>/dev/null | sed -n "s/^$ROOT_ENV_VAR=//p"
+}
+
+# Picks the monorepo root and sets CORE_DIR/UI_DIR/ADMIN_UI_DIR from it.
 # core/azure/common merged into a single "core" monorepo on 2026-11-05, and
 # ui/admin-ui followed on 2026-11-10 — all five now live as subfolders of
 # the one "core" repo instead of as separate sibling repos.
-CORE_DIR="$SCRIPT_DIR/../core/core"
-UI_DIR="$SCRIPT_DIR/../core/ui"
-ADMIN_UI_DIR="$SCRIPT_DIR/../core/admin-ui"
+# Order: the explicit argument, then the running session's root, then ../core.
+resolve_root() {
+    local requested="$1" root
+    if [[ -n "$requested" ]]; then
+        root="$requested"
+    else
+        root="$(session_root)"
+        [[ -z "$root" ]] && root="$DEFAULT_ROOT"
+    fi
 
-SESSION_NAME="dev-env"
+    if [[ ! -d "$root" ]]; then
+        echo -e "${RED}Monorepo directory '$root' does not exist.${NC}"
+        exit 1
+    fi
+    ROOT_DIR="${root:A}"
+
+    for sub in core ui admin-ui; do
+        if [[ ! -d "$ROOT_DIR/$sub" ]]; then
+            echo -e "${RED}'$ROOT_DIR' has no '$sub' folder — is it the ProsperOps monorepo?${NC}"
+            exit 1
+        fi
+    done
+
+    CORE_DIR="$ROOT_DIR/core"
+    UI_DIR="$ROOT_DIR/ui"
+    ADMIN_UI_DIR="$ROOT_DIR/admin-ui"
+}
 
 # Types a command into a tmux pane, with a colored header on start and a
 # colored exit message (so a crashed pane doesn't just close silently).
 # Usage: run_pane <target> <dir> <label> <command> [login]
 #   login=login sources ~/.zshrc first (needed for nvm).
+# The exit code is written as \$? so the pane's own shell passes it through
+# unexpanded and the inner zsh reports the command's real status.
 run_pane() {
     local target="$1" dir="$2" label="$3" inner_cmd="$4" login="$5"
     local prelude=""
     [[ "$login" == "login" ]] && prelude='export DISABLE_AUTO_UPDATE=true && source ~/.zshrc && '
 
     tmux send-keys -t "$target" "cd '$dir'" Enter
-    tmux send-keys -t "$target" 'zsh -lc "'"$prelude"'echo -e \"\033[1;36m==== '"$label"' ====\033[0m\" && '"$inner_cmd"'; echo -e \"\033[1;31m'"$label"' exited with code $?. Press Enter to close pane.\033[0m\"; read"' Enter
+    tmux send-keys -t "$target" 'zsh -lc "'"$prelude"'echo -e \"\033[1;36m==== '"$label"' ====\033[0m\" && '"$inner_cmd"'; echo -e \"\033[1;31m'"$label"' exited with code \$?. Press Enter to close pane.\033[0m\"; read"' Enter
 }
 
 start() {
@@ -50,12 +87,19 @@ start() {
 
     # Check if session already exists
     if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
-        echo -e "${YELLOW}Session '$SESSION_NAME' already exists. Attaching...${NC}"
+        local running_root="$(session_root)"
+        if [[ -n "$running_root" && "$running_root" != "$ROOT_DIR" ]]; then
+            echo -e "${YELLOW}Session '$SESSION_NAME' is already running from '$running_root', not '$ROOT_DIR'.${NC}"
+            echo -e "${YELLOW}Run '$0 restart $ROOT_DIR' to switch. Attaching to the existing session...${NC}"
+        else
+            echo -e "${YELLOW}Session '$SESSION_NAME' already exists. Attaching...${NC}"
+        fi
         tmux attach-session -t "$SESSION_NAME"
         return
     fi
 
     echo -e "${GREEN}Starting development environment with split panes...${NC}"
+    echo -e "${GREEN}Using monorepo at $ROOT_DIR${NC}"
 
     # Perform AWS SSO login
     echo -e "${YELLOW}Performing AWS SSO login...${NC}"
@@ -78,6 +122,7 @@ start() {
 
     # Create tmux session with first pane
     tmux new-session -d -s "$SESSION_NAME" -n "dev"
+    tmux set-environment -t "$SESSION_NAME" "$ROOT_ENV_VAR" "$ROOT_DIR"
 
     # Create the 3-row layout
     tmux split-window -v -t "$SESSION_NAME:dev"    # Creates row 2
@@ -90,10 +135,12 @@ start() {
     tmux split-window -h -t "$SESSION_NAME:dev.2"
 
     # Pane 0: UI (top-left)
-    run_pane "$SESSION_NAME:dev.0" "$UI_DIR" "UI" "nvm use && yarn && yarn dev" login
+    # `nvm install` (not `nvm use`) so a Node version bump in .nvmrc gets
+    # installed automatically; it switches to that version either way.
+    run_pane "$SESSION_NAME:dev.0" "$UI_DIR" "UI" "nvm install && yarn && yarn dev" login
 
     # Pane 1: Admin UI (top-right)
-    run_pane "$SESSION_NAME:dev.1" "$ADMIN_UI_DIR" "ADMIN UI" "nvm use && yarn && yarn dev" login
+    run_pane "$SESSION_NAME:dev.1" "$ADMIN_UI_DIR" "ADMIN UI" "nvm install && yarn && yarn dev" login
 
     # Pane 2: Server (middle-left)
     run_pane "$SESSION_NAME:dev.2" "$CORE_DIR" "SERVER" "echo 'Waiting for Docker services to start...' && sleep 10 && ./scripts/server watch"
@@ -157,14 +204,22 @@ stop() {
 }
 
 restart() {
+    local requested="$1"
+    # Stop from whatever checkout the running session uses, so docker-compose
+    # down runs in the right folder, then start from the requested one (or
+    # the same one again if none was given).
+    resolve_root ""
+    local previous_root="$ROOT_DIR"
     stop
     sleep 2
+    resolve_root "${requested:-$previous_root}"
     start
 }
 
 status() {
     echo -e "${GREEN}Development Environment Status:${NC}"
     echo "================================"
+    echo "Monorepo: $ROOT_DIR"
 
     # Check tmux session
     if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
@@ -190,7 +245,7 @@ attach() {
     if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
         tmux attach-session -t "$SESSION_NAME"
     else
-        echo -e "${RED}No session '$SESSION_NAME' found. Run '$0 start' first.${NC}"
+        echo -e "${RED}No session '$SESSION_NAME' found. Run '$0 start [monorepo-dir]' first.${NC}"
     fi
 }
 
@@ -216,15 +271,18 @@ logs() {
 # Main command handling
 case "$1" in
     start)
+        resolve_root "$2"
         start
         ;;
     stop)
+        resolve_root "$2"
         stop
         ;;
     restart)
-        restart
+        restart "$2"
         ;;
     status)
+        resolve_root "$2"
         status
         ;;
     attach)
@@ -234,7 +292,7 @@ case "$1" in
         logs
         ;;
     *)
-        echo "Usage: $0 {start|stop|restart|status|attach|logs}"
+        echo "Usage: $0 {start|stop|restart|status|attach|logs} [monorepo-dir]"
         echo ""
         echo "Commands:"
         echo "  start    - Start all services in split-pane tmux layout"
@@ -243,6 +301,11 @@ case "$1" in
         echo "  status   - Show status of all services"
         echo "  attach   - Reattach to existing tmux session"
         echo "  logs     - Save current pane contents to log files"
+        echo ""
+        echo "monorepo-dir (optional; start, stop, restart, status):"
+        echo "  The ProsperOps monorepo checkout to run from, e.g. a git worktree."
+        echo "  Defaults to the folder the running session was started from, or"
+        echo "  else ../core next to this script."
         echo ""
         echo "Layout: 3 rows - Row 1: UI, Admin UI; Row 2: Server, Server Admin; Row 3: Docker Compose"
         echo "Server processes wait 10 seconds for Docker services to start."
