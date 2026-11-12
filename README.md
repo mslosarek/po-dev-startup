@@ -9,8 +9,10 @@ split-pane layout.
 - `tmux` (`brew install tmux`)
 - AWS CLI configured for SSO (`aws sso login` runs automatically on `start`)
 - `nvm`, `yarn`, Docker Desktop
-- This script expects one sibling directory next to `dev-startup/`: `../core`,
-  the ProsperOps monorepo. Everything it runs lives inside it as subfolders:
+- A checkout of the ProsperOps monorepo. By default the script uses the
+  sibling directory `../core` next to `dev-startup/`; pass a different path
+  to run from a git worktree instead (see [Using a worktree](#using-a-worktree)).
+  Everything it runs lives inside the monorepo as subfolders:
   - `core/core` — the core API (server + server-admin)
   - `core/ui` — the customer console
   - `core/admin-ui` — the internal admin console
@@ -18,16 +20,43 @@ split-pane layout.
 ## Usage
 
 ```sh
-./dev-split.sh start    # start everything, attach to the session
-./dev-split.sh stop     # kill the tmux session and docker-compose down
-./dev-split.sh restart  # stop, then start
-./dev-split.sh status   # show whether the session is up + docker-compose ps
-./dev-split.sh attach   # re-attach to an already-running session
-./dev-split.sh logs     # dump each pane's current scrollback to pane-*.log
+./dev-split.sh start   [monorepo-dir]  # start everything, attach to the session
+./dev-split.sh stop    [monorepo-dir]  # kill the tmux session and docker-compose down
+./dev-split.sh restart [monorepo-dir]  # stop, then start
+./dev-split.sh status  [monorepo-dir]  # show whether the session is up + docker-compose ps
+./dev-split.sh attach                  # re-attach to an already-running session
+./dev-split.sh logs                    # dump each pane's current scrollback to pane-*.log
 ```
 
 `start` is also how you reconnect day-to-day: if a session is already
 running, it just attaches you to it instead of starting a second one.
+
+### Using a worktree
+
+The optional `monorepo-dir` argument points the script at a different
+checkout of the monorepo, such as a git worktree, in place of `../core`. It
+must contain the `core`, `ui` and `admin-ui` folders.
+
+```sh
+./dev-split.sh start ~/Worktrees/my-branch
+```
+
+The session remembers which checkout it was started from, so `stop`,
+`status` and `restart` run against that same checkout without the argument
+being repeated. When the argument is left out, the script uses the running
+session's checkout if there is one, and `../core` otherwise.
+
+Only one session (`dev-env`) runs at a time, since every checkout uses the
+same ports. To switch checkouts, restart with the new path — this stops the
+old checkout's services and starts the new one's:
+
+```sh
+./dev-split.sh restart ~/ClaudeWorktrees/core/louisg/other-branch
+```
+
+Running `start <path>` while a session from a different checkout is up
+prints a warning and attaches to the existing session rather than replacing
+it.
 
 ## Layout
 
@@ -55,15 +84,15 @@ tmux commands are a prefix key followed by a letter — the default prefix is
 **Ctrl+b** (shown below as `C-b`). If your `~/.tmux.conf` remaps the prefix,
 use that key instead.
 
-| Action | Keys |
-|---|---|
-| Switch to window 1 or 2 | `C-b 1` / `C-b 2` |
-| Switch pane | `C-b` + arrow key |
-| Jump to pane by number | `C-b q`, then the number shown |
-| Resize pane | `C-b` + `Alt` + arrow key |
-| Zoom current pane to full screen (toggle) | `C-b z` |
-| Scroll back / copy mode | `C-b [`, arrow keys or `PgUp`/`PgDn` to scroll, `q` to exit |
-| Detach (leave it running, return to your normal terminal) | `C-b d` |
+| Action                                                    | Keys                                                        |
+| --------------------------------------------------------- | ----------------------------------------------------------- |
+| Switch to window 1 or 2                                   | `C-b 1` / `C-b 2`                                           |
+| Switch pane                                               | `C-b` + arrow key                                           |
+| Jump to pane by number                                    | `C-b q`, then the number shown                              |
+| Resize pane                                               | `C-b` + `Alt` + arrow key                                   |
+| Zoom current pane to full screen (toggle)                 | `C-b z`                                                     |
+| Scroll back / copy mode                                   | `C-b [`, arrow keys or `PgUp`/`PgDn` to scroll, `q` to exit |
+| Detach (leave it running, return to your normal terminal) | `C-b d`                                                     |
 
 ### Opening and closing things
 
